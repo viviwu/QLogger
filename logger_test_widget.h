@@ -43,6 +43,8 @@ class LoggerTestWidget : public QWidget {
 
   void setupConnections();
 
+  void configLogger();
+
   void showEvent(QShowEvent* event);
 
  private:

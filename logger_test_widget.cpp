@@ -20,7 +20,20 @@ LoggerTestWidget::LoggerTestWidget(QWidget* parent) : QWidget(parent) {
   setupUI();
   setupConnections();
 
-  // initLogger(config);
+  ///////////////////////////////////////////////
+  // 动态设置日志过滤规则
+  QLoggingCategory::setFilterRules(
+      "app.debug=false\n"
+      "network.info=true\n"
+  );
+  LOG_DEBUG("这条 app.debug 日志不会输出");
+  LOG_NETWORK_INFO("这条 network.info 日志会输出");
+
+  // QT_LOGGING_RULES 也可以通过环境变量或代码动态设置
+  // export QT_LOGGING_RULES="app.debug=false;network.info=true"
+  // ./ your_app configLogger();
+
+  ///////////////////////////////////////////////
 
   // 启动测试定时器
   m_testTimer = new QTimer(this);
@@ -284,7 +297,7 @@ void LoggerTestWidget::setupConnections() {
           &LoggerTestWidget::onRotateClicked);
 }
 
-void LoggerTestWidget::showEvent(QShowEvent* event) {
+void LoggerTestWidget:: configLogger() {
   // Use QStandardPaths to get the Logs location
   QString logsPath =
       QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
@@ -311,5 +324,9 @@ void LoggerTestWidget::showEvent(QShowEvent* event) {
 
   initLogger(config);
 
-  qDebug() << logDir;
+  LOG_DEBUG(logDir);
+}
+
+void LoggerTestWidget::showEvent(QShowEvent* event) {
+
 }
