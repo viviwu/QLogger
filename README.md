@@ -175,6 +175,4 @@ from a settings dialog).
 
 ## License
 
-No license has been specified yet. If you plan to use QLogger in an open-source
-project, add a `LICENSE` file (for example MIT or Apache-2.0) before
-distributing it.
+QLogger is released under the [MIT License](LICENSE).
