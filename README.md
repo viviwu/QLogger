@@ -1,6 +1,6 @@
 # QLogger
 
-A lightweight, thread-safe logging library for Qt applications.
+A lightweight, thread-safe, MIT-licensed logging library for Qt applications.
 
 QLogger is a small drop-in logging module built on top of Qt's native message
 system. It installs a custom `qInstallMessageHandler` so that regular
@@ -11,6 +11,9 @@ existing logging code required.
 It is intentionally compact (one header + one source file) and has no
 dependencies other than Qt Core, making it easy to embed in desktop, console or
 embedded Qt projects.
+
+QLogger is free and open source, released under the MIT License. Bug reports,
+feature requests and pull requests from the Qt community are welcome.
 
 ## Features
 
@@ -172,6 +175,13 @@ ctest --test-dir build --output-on-failure
 handler can safely be called from multiple threads. Configuration changes are
 serialized with logging, so `setConfig()` may be called at runtime (for example
 from a settings dialog).
+
+## Contributing
+
+QLogger is an open-source project and contributions are welcome. If you find a
+bug or have an idea for an improvement, please open an issue or submit a pull
+request. For larger changes, opening an issue first helps keep the discussion
+focused.
 
 ## License
 
