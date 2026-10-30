@@ -4,10 +4,15 @@
 #include <QDateTime>
 #include <QFile>
 #include <QLoggingCategory>
+#include <QMutex>
 #include <QMutexLocker>
 #include <QQueue>
+#include <QTextStream>
 #include <QThread>
 #include <QTimer>
+
+#include <atomic>
+#include <memory>
 
 // 定义日志级别枚举
 enum class LogLevel {
@@ -64,6 +69,9 @@ class QLogger : public QObject {
   // 获取当前配置
   LogConfig getConfig() const;
 
+  // 日志系统是否已初始化
+  bool isInitialized() const;
+
   // 立即刷新日志到文件
   void flush();
 
@@ -93,7 +101,7 @@ class QLogger : public QObject {
     QLogger& logger = QLogger::instance();
 
     // 防止在初始化过程中的递归调用
-    if (!logger.m_initialized) {
+    if (!logger.m_initialized.load(std::memory_order_acquire)) {
       return;
     }
 
@@ -103,12 +111,19 @@ class QLogger : public QObject {
   void handleMessage(QtMsgType type, const QMessageLogContext& context,
                      const QString& msg);
 
-  bool shouldLog(QtMsgType type) const;
-  void outputToConsole(const LogEntry& entry);
+  static LogLevel toLogLevel(QtMsgType type);
+  bool shouldLog(const LogConfig& config, QtMsgType type) const;
+  void outputToConsole(const LogEntry& entry, const LogConfig& config);
 
-  QString formatLogMessage(const LogEntry& entry);
+  QString formatLogMessage(const LogEntry& entry,
+                           const LogConfig& config) const;
 
   QString levelToString(QtMsgType type) const;
+
+  // 在锁内复制一份配置，避免在处理日志时无锁读取成员
+  LogConfig configSnapshot() const;
+
+  QString logDirAbsolute() const;
 
   bool setupLogDirectory();
 
@@ -124,12 +139,13 @@ class QLogger : public QObject {
 
   void cleanupOldFiles();
 
-  void setupAsyncTimer();
+  void setupAsyncTimer(const LogConfig& config);
 
  private:
   mutable QMutex m_mutex;
+  mutable QMutex m_consoleMutex;
   LogConfig m_config;
-  volatile bool m_initialized;
+  std::atomic<bool> m_initialized;
 
   std::unique_ptr<QFile> m_currentLogFile;
   std::unique_ptr<QTextStream> m_logStream;

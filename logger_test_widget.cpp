@@ -1,10 +1,8 @@
 #include "logger_test_widget.h"
 
-#include <QDir>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLoggingCategory>
-#include <QStandardPaths>
 #include <QVBoxLayout>
 
 #include "qlogger/qlogger.h"
@@ -31,7 +29,7 @@ LoggerTestWidget::LoggerTestWidget(QWidget* parent) : QWidget(parent) {
 
   // QT_LOGGING_RULES 也可以通过环境变量或代码动态设置
   // export QT_LOGGING_RULES="app.debug=false;network.info=true"
-  // ./ your_app configLogger();
+  // 日志系统由 main.cpp 中的 setupLogger() 初始化
 
   ///////////////////////////////////////////////
 
@@ -112,6 +110,8 @@ void LoggerTestWidget::onConfigChanged() {
     config.minLevel = LogLevel::Warning;
   else if (levelText == "Critical")
     config.minLevel = LogLevel::Critical;
+  else if (levelText == "Fatal")
+    config.minLevel = LogLevel::Fatal;
 
   QLogger::instance().setConfig(config);
   qCInfo(ui) << "Logger configuration updated";
@@ -203,7 +203,7 @@ void LoggerTestWidget::setupUI() {
 
   row1Layout->addWidget(new QLabel("Min Level:"));
   m_logLevelCombo = new QComboBox();
-  m_logLevelCombo->addItems({"Debug", "Info", "Warning", "Critical"});
+  m_logLevelCombo->addItems({"Debug", "Info", "Warning", "Critical", "Fatal"});
   row1Layout->addWidget(m_logLevelCombo);
 
   configLayout->addLayout(row1Layout);
@@ -295,38 +295,4 @@ void LoggerTestWidget::setupConnections() {
           &LoggerTestWidget::onFlushClicked);
   connect(m_rotateButton, &QPushButton::clicked, this,
           &LoggerTestWidget::onRotateClicked);
-}
-
-void LoggerTestWidget:: configLogger() {
-  // Use QStandardPaths to get the Logs location
-  QString logsPath =
-      QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
-  // On macOS: ~/Library/Application Support/MyQtApp
-  // We'll append "/logs" to follow convention
-
-  QString logDir = logsPath + "/logs";
-  QDir dir;
-  if (!dir.exists(logDir)) {
-    dir.mkpath(logDir);  // Create logs directory if it doesn't exist
-  }
-
-  // 初始化日志系统
-  LogConfig config;
-  config.logDir = logsPath;
-  config.logFileName = "test_app";
-  config.maxFileSize = 1024 * 1024;  // 1MB for testing
-  config.maxFileCount = 3;
-  config.enableConsole = true;
-  config.enableTimestamp = true;
-  config.enableThreadId = true;
-  config.asyncMode = true;
-  config.flushInterval = 500;
-
-  initLogger(config);
-
-  LOG_DEBUG(logDir);
-}
-
-void LoggerTestWidget::showEvent(QShowEvent* event) {
-
 }

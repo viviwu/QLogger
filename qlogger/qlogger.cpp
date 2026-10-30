@@ -1,45 +1,56 @@
 #include "qlogger.h"
 
-#include <QApplication>
+#include <QCoreApplication>
 #include <QDebug>
 #include <QDir>
+#include <QFileInfo>
 #include <QMutex>
-#include <QStandardPaths>
 #include <QTextStream>
 #include <memory>
 
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+#include <QStringConverter>
+#endif
+
+namespace {
+
+// 防止消息处理器自身产生的日志造成递归
+struct RecursionGuard {
+  bool& flag;
+  explicit RecursionGuard(bool& value) : flag(value) { flag = true; }
+  ~RecursionGuard() { flag = false; }
+};
+
+}  // namespace
+
 // 初始化日志系统
 bool QLogger::initialize(const LogConfig& config) {
-  // 防止重复初始化
-  if (m_initialized) {
-    return true;
+  {
+    QMutexLocker locker(&m_mutex);
+
+    // 防止重复初始化
+    if (m_initialized.load(std::memory_order_acquire)) {
+      return true;
+    }
+
+    m_config = config;
+
+    if (!setupLogDirectory()) {
+      return false;
+    }
+
+    if (!openLogFile()) {
+      return false;
+    }
+
+    m_initialized.store(true, std::memory_order_release);
+    setupAsyncTimer(m_config);
   }
-
-  // 先设置配置和标志，避免在加锁状态下调用其他可能产生日志的函数
-  m_config = config;
-
-  // 设置日志目录（不加锁，避免死锁）
-  if (!setupLogDirectory()) {
-    return false;
-  }
-
-  // 打开日志文件（不加锁，避免死锁）
-  if (!openLogFile()) {
-    return false;
-  }
-
-  // 设置初始化标志
-  m_initialized = true;
 
   // 安装消息处理器（此时已经可以安全处理日志）
   qInstallMessageHandler(messageHandler);
 
-  // 如果启用异步模式，设置定时器
-  if (m_config.asyncMode) {
-    setupAsyncTimer();
-  }
-
-  // 使用日志系统输出初始化成功消息（现在是安全的）
+  // 使用日志系统输出初始化成功消息
   LOG_INFO("QLogger initialized successfully");
 
   return true;
@@ -47,30 +58,34 @@ bool QLogger::initialize(const LogConfig& config) {
 
 // 设置日志配置
 void QLogger::setConfig(const LogConfig& config) {
-  if (!m_initialized) {
+  QMutexLocker locker(&m_mutex);
+
+  if (!m_initialized.load(std::memory_order_acquire)) {
     m_config = config;
     return;
   }
 
-  // 临时禁用日志处理器，避免在重新配置过程中的死锁
-  qInstallMessageHandler(nullptr);
+  // 先把队列中的日志写入旧文件，再切换到新配置
+  flushPendingLogs();
+  closeLogFile();
 
-  {
-    QMutexLocker locker(&m_mutex);
-    m_config = config;
-    closeLogFile();
-    setupLogDirectory();
+  m_config = config;
+
+  if (setupLogDirectory()) {
     openLogFile();
   }
 
-  // 重新安装消息处理器
-  qInstallMessageHandler(messageHandler);
+  setupAsyncTimer(m_config);
 }
 
 // 获取当前配置
 LogConfig QLogger::getConfig() const {
   QMutexLocker locker(&m_mutex);
   return m_config;
+}
+
+bool QLogger::isInitialized() const {
+  return m_initialized.load(std::memory_order_acquire);
 }
 
 // 立即刷新日志到文件
@@ -82,7 +97,7 @@ void QLogger::flush() {
 // 强制日志轮转
 void QLogger::rotate() {
   QMutexLocker locker(&m_mutex);
-  if (m_initialized) {
+  if (m_initialized.load(std::memory_order_acquire)) {
     rotateLogFile();
   }
 }
@@ -90,14 +105,14 @@ void QLogger::rotate() {
 // 清理旧日志文件
 void QLogger::cleanup() {
   QMutexLocker locker(&m_mutex);
-  if (m_initialized) {
+  if (m_initialized.load(std::memory_order_acquire)) {
     cleanupOldFiles();
   }
 }
 
 // 关闭日志系统
 void QLogger::shutdown() {
-  if (!m_initialized) {
+  if (!m_initialized.load(std::memory_order_acquire)) {
     return;
   }
 
@@ -106,35 +121,41 @@ void QLogger::shutdown() {
 
   QMutexLocker locker(&m_mutex);
 
+  if (!m_initialized.load(std::memory_order_acquire)) {
+    return;
+  }
+
   if (m_flushTimer) {
     m_flushTimer->stop();
-    m_flushTimer->deleteLater();
+    delete m_flushTimer;
     m_flushTimer = nullptr;
   }
 
   flushPendingLogs();
   closeLogFile();
-  m_initialized = false;
+  m_initialized.store(false, std::memory_order_release);
 
   if (m_config.enableConsole) {
-    fprintf(stdout, "[INFO] QLogger shutdown completed\n");
+    fputs("[INFO] QLogger shutdown completed\n", stdout);
     fflush(stdout);
   }
 }
 
 // private slots:
 void QLogger::onFlushTimer() {
-  if (m_initialized) {
-    QMutexLocker locker(&m_mutex);
-    flushPendingLogs();
+  if (!m_initialized.load(std::memory_order_acquire)) {
+    return;
   }
+
+  QMutexLocker locker(&m_mutex);
+  flushPendingLogs();
 }
 
 // private:
 QLogger::QLogger() : m_initialized(false), m_flushTimer(nullptr) {
   // 确保在应用程序退出时自动清理
   if (qApp) {
-    connect(qApp, &QApplication::aboutToQuit, this, &QLogger::shutdown);
+    connect(qApp, &QCoreApplication::aboutToQuit, this, &QLogger::shutdown);
   }
 }
 
@@ -142,13 +163,20 @@ QLogger::~QLogger() { shutdown(); }
 
 void QLogger::handleMessage(QtMsgType type, const QMessageLogContext& context,
                             const QString& msg) {
-  // 防止日志系统自己的消息造成递归
-  if (msg.contains("QLogger") &&
-      (msg.contains("initialized") || msg.contains("shutdown"))) {
+  static thread_local bool inHandler = false;
+  if (inHandler) {
+    return;
+  }
+  RecursionGuard guard(inHandler);
+
+  if (!m_initialized.load(std::memory_order_acquire)) {
     return;
   }
 
-  if (!shouldLog(type)) {
+  // 取一份配置快照，避免在无锁状态下读取 m_config
+  const LogConfig config = configSnapshot();
+
+  if (!shouldLog(config, type)) {
     return;
   }
 
@@ -162,56 +190,73 @@ void QLogger::handleMessage(QtMsgType type, const QMessageLogContext& context,
   entry.timestamp = QDateTime::currentDateTime();
   entry.threadId = QThread::currentThreadId();
 
-  // 输出到控制台（不需要加锁）
-  if (m_config.enableConsole) {
-    outputToConsole(entry);
+  // 输出到控制台（不持有文件锁）
+  if (config.enableConsole) {
+    outputToConsole(entry, config);
   }
 
-  // 处理文件输出（需要加锁，但范围要小）
-  if (m_config.asyncMode) {
-    // 异步模式：添加到队列
-    {
-      QMutexLocker locker(&m_mutex);
-      m_logQueue.enqueue(entry);
+  QMutexLocker locker(&m_mutex);
 
-      // 如果队列过长，立即刷新
-      if (m_logQueue.size() > 100) {
-        flushPendingLogs();
-      }
+  if (!m_initialized.load(std::memory_order_acquire)) {
+    return;
+  }
+
+  if (config.asyncMode) {
+    // 异步模式：添加到队列
+    m_logQueue.enqueue(entry);
+
+    // 如果队列过长，立即刷新
+    if (m_logQueue.size() > 100) {
+      flushPendingLogs();
     }
   } else {
     // 同步模式：直接写入文件
-    {
-      QMutexLocker locker(&m_mutex);
-      writeLogEntry(entry);
-    }
+    writeLogEntry(entry);
   }
 }
 
-bool QLogger::shouldLog(QtMsgType type) const {
-  LogLevel level = static_cast<LogLevel>(type);
-  return level >= m_config.minLevel;
+LogLevel QLogger::toLogLevel(QtMsgType type) {
+  // 注意：QtMsgType 的顺序与 LogLevel 不同（QtInfoMsg 在最后）
+  switch (type) {
+    case QtDebugMsg:
+      return LogLevel::Debug;
+    case QtInfoMsg:
+      return LogLevel::Info;
+    case QtWarningMsg:
+      return LogLevel::Warning;
+    case QtCriticalMsg:
+      return LogLevel::Critical;
+    case QtFatalMsg:
+      return LogLevel::Fatal;
+  }
+  return LogLevel::Debug;
 }
 
-void QLogger::outputToConsole(const LogEntry& entry) {
-  QString formattedMsg = formatLogMessage(entry);
+bool QLogger::shouldLog(const LogConfig& config, QtMsgType type) const {
+  return toLogLevel(type) >= config.minLevel;
+}
+
+void QLogger::outputToConsole(const LogEntry& entry,
+                              const LogConfig& config) {
+  const QByteArray line = formatLogMessage(entry, config).toLocal8Bit();
 
   // 直接使用C风格输出，避免Qt的递归问题
-  if (entry.type >= QtCriticalMsg) {
-    fprintf(stderr, "%s\n", formattedMsg.toLocal8Bit().constData());
-    fflush(stderr);
-  } else {
-    fprintf(stdout, "%s\n", formattedMsg.toLocal8Bit().constData());
-    fflush(stdout);
-  }
+  const bool isError =
+      (entry.type == QtCriticalMsg || entry.type == QtFatalMsg);
+  FILE* out = isError ? stderr : stdout;
+
+  QMutexLocker locker(&m_consoleMutex);
+  fprintf(out, "%s\n", line.constData());
+  fflush(out);
 }
 
-QString QLogger::formatLogMessage(const LogEntry& entry) {
+QString QLogger::formatLogMessage(const LogEntry& entry,
+                                  const LogConfig& config) const {
   QString result;
   QTextStream stream(&result);
 
   // 时间戳
-  if (m_config.enableTimestamp) {
+  if (config.enableTimestamp) {
     stream << "[" << entry.timestamp.toString("yyyy-MM-dd hh:mm:ss.zzz")
            << "] ";
   }
@@ -220,7 +265,7 @@ QString QLogger::formatLogMessage(const LogEntry& entry) {
   stream << "[" << levelToString(entry.type) << "] ";
 
   // 线程ID
-  if (m_config.enableThreadId) {
+  if (config.enableThreadId) {
     stream << "[Thread:" << reinterpret_cast<quintptr>(entry.threadId) << "] ";
   }
 
@@ -258,12 +303,20 @@ QString QLogger::levelToString(QtMsgType type) const {
   }
 }
 
-bool QLogger::setupLogDirectory() {
-  QDir dir;
-  QString fullPath = dir.absoluteFilePath(m_config.logDir);
+LogConfig QLogger::configSnapshot() const {
+  QMutexLocker locker(&m_mutex);
+  return m_config;
+}
 
-  if (!dir.exists(fullPath)) {
-    if (!dir.mkpath(fullPath)) {
+QString QLogger::logDirAbsolute() const {
+  return QDir(m_config.logDir).absolutePath();
+}
+
+bool QLogger::setupLogDirectory() {
+  const QString fullPath = logDirAbsolute();
+
+  if (!QDir(fullPath).exists()) {
+    if (!QDir().mkpath(fullPath)) {
       if (m_config.enableConsole) {
         fprintf(stderr, "[ERROR] Failed to create log directory: %s\n",
                 fullPath.toLocal8Bit().constData());
@@ -275,25 +328,31 @@ bool QLogger::setupLogDirectory() {
 }
 
 bool QLogger::openLogFile() {
-  QString fileName =
-      QString("%1/%2_%3.log")
-          .arg(m_config.logDir)
+  QDir dir(logDirAbsolute());
+  const QString fileName = dir.absoluteFilePath(
+      QString("%1_%2.log")
           .arg(m_config.logFileName)
-          .arg(QDateTime::currentDateTime().toString("yyyyMMdd"));
+          .arg(QDateTime::currentDateTime().toString("yyyyMMdd")));
 
   m_currentLogFile = std::make_unique<QFile>(fileName);
 
   if (m_currentLogFile->open(QIODevice::WriteOnly | QIODevice::Append)) {
     m_logStream = std::make_unique<QTextStream>(m_currentLogFile.get());
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
     m_logStream->setEncoding(QStringConverter::Utf8);
+#else
+    m_logStream->setCodec("UTF-8");
+#endif
     return true;
-  } else {
-    if (m_config.enableConsole) {
-      fprintf(stderr, "[ERROR] Failed to open log file: %s\n",
-              fileName.toLocal8Bit().constData());
-    }
-    return false;
   }
+
+  if (m_config.enableConsole) {
+    fprintf(stderr, "[ERROR] Failed to open log file: %s\n",
+            fileName.toLocal8Bit().constData());
+  }
+
+  m_currentLogFile.reset();
+  return false;
 }
 
 void QLogger::closeLogFile() {
@@ -312,8 +371,7 @@ void QLogger::writeLogEntry(const LogEntry& entry) {
     return;
   }
 
-  QString formattedMsg = formatLogMessage(entry);
-  *m_logStream << formattedMsg << Qt::endl;
+  *m_logStream << formatLogMessage(entry, m_config) << '\n';
   m_logStream->flush();
 
   // 检查文件大小，需要时进行轮转
@@ -324,13 +382,13 @@ void QLogger::writeLogEntry(const LogEntry& entry) {
 
 void QLogger::flushPendingLogs() {
   if (!m_logStream) {
+    m_logQueue.clear();
     return;
   }
 
   while (!m_logQueue.isEmpty()) {
-    LogEntry entry = m_logQueue.dequeue();
-    QString formattedMsg = formatLogMessage(entry);
-    *m_logStream << formattedMsg << Qt::endl;
+    const LogEntry entry = m_logQueue.dequeue();
+    *m_logStream << formatLogMessage(entry, m_config) << '\n';
   }
 
   m_logStream->flush();
@@ -346,20 +404,28 @@ void QLogger::rotateLogFile() {
     return;
   }
 
-  QString currentFileName = m_currentLogFile->fileName();
+  const QString currentFileName = m_currentLogFile->fileName();
   closeLogFile();
 
-  QString baseName =
-      QString("%1/%2_%3")
-          .arg(m_config.logDir)
-          .arg(m_config.logFileName)
-          .arg(QDateTime::currentDateTime().toString("yyyyMMdd"));
+  QDir dir(logDirAbsolute());
+  const QString baseName = QString("%1_%2").arg(
+      m_config.logFileName,
+      QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss_zzz"));
 
-  // 重命名当前文件
-  QString timestamp = QDateTime::currentDateTime().toString("hhmmss");
-  QString rotatedName = QString("%1_%2.log").arg(baseName).arg(timestamp);
+  QString rotatedName = dir.absoluteFilePath(baseName + ".log");
+  int suffix = 1;
+  while (QFile::exists(rotatedName)) {
+    rotatedName =
+        dir.absoluteFilePath(QString("%1_%2.log").arg(baseName).arg(suffix++));
+  }
 
-  QFile::rename(currentFileName, rotatedName);
+  // 重命名当前文件，失败时保持原文件继续追加
+  if (!QFile::rename(currentFileName, rotatedName)) {
+    if (m_config.enableConsole) {
+      fprintf(stderr, "[ERROR] Failed to rotate log file: %s\n",
+              currentFileName.toLocal8Bit().constData());
+    }
+  }
 
   // 清理旧文件
   cleanupOldFiles();
@@ -369,22 +435,31 @@ void QLogger::rotateLogFile() {
 }
 
 void QLogger::cleanupOldFiles() {
-  QDir logDir(m_config.logDir);
-  QString pattern = QString("%1_*.log").arg(m_config.logFileName);
+  QDir logDir(logDirAbsolute());
+  const QString pattern = QString("%1_*.log").arg(m_config.logFileName);
   QStringList logFiles =
       logDir.entryList(QStringList() << pattern, QDir::Files, QDir::Time);
 
-  // 保留最新的几个文件，删除多余的
+  // 当前活动文件永远不能被清理
+  if (m_currentLogFile) {
+    logFiles.removeAll(QFileInfo(m_currentLogFile->fileName()).fileName());
+  }
+
+  // 保留最新的几个轮转文件，删除多余的
   while (logFiles.size() > m_config.maxFileCount) {
-    QString oldestFile = logFiles.takeLast();
+    const QString oldestFile = logFiles.takeLast();
     logDir.remove(oldestFile);
   }
 }
 
-void QLogger::setupAsyncTimer() {
-  if (!m_flushTimer) {
-    m_flushTimer = new QTimer(this);
-    connect(m_flushTimer, &QTimer::timeout, this, &QLogger::onFlushTimer);
+void QLogger::setupAsyncTimer(const LogConfig& config) {
+  if (config.asyncMode) {
+    if (!m_flushTimer) {
+      m_flushTimer = new QTimer(this);
+      connect(m_flushTimer, &QTimer::timeout, this, &QLogger::onFlushTimer);
+    }
+    m_flushTimer->start(config.flushInterval);
+  } else if (m_flushTimer) {
+    m_flushTimer->stop();
   }
-  m_flushTimer->start(m_config.flushInterval);
 }

@@ -10,12 +10,18 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets)
-find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets)
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets Core)
+
+# 核心日志库，可被 demo 和测试复用
+add_library(QLogger STATIC
+    qlogger/qlogger.h
+    qlogger/qlogger.cpp
+)
+target_include_directories(QLogger PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(QLogger PUBLIC Qt${QT_VERSION_MAJOR}::Core)
 
 set(PROJECT_SOURCES
         main.cpp
-        qlogger/qlogger.h
-        qlogger/qlogger.cpp
         logger_test_widget.h
         logger_test_widget.cpp
 )
@@ -43,7 +49,7 @@ else()
     endif()
 endif()
 
-target_link_libraries(QLoggerDemo PRIVATE Qt${QT_VERSION_MAJOR}::Widgets)
+target_link_libraries(QLoggerDemo PRIVATE QLogger Qt${QT_VERSION_MAJOR}::Widgets)
 
 # Qt for iOS sets MACOSX_BUNDLE_GUI_IDENTIFIER automatically since Qt 6.1.
 # If you are developing for iOS or macOS you should consider setting an
@@ -65,6 +71,12 @@ install(TARGETS QLoggerDemo
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
+
+include(CTest)
+if(BUILD_TESTING)
+    find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Test)
+    add_subdirectory(tests)
+endif()
 
 if(QT_VERSION_MAJOR EQUAL 6)
     qt_finalize_executable(QLoggerDemo)

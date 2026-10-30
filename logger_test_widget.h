@@ -43,10 +43,6 @@ class LoggerTestWidget : public QWidget {
 
   void setupConnections();
 
-  void configLogger();
-
-  void showEvent(QShowEvent* event);
-
  private:
   // UI 组件
   QPushButton* m_debugButton;
