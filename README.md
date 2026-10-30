@@ -1,85 +1,180 @@
-# QLogger项目结构
+# QLogger
+
+A lightweight, thread-safe logging library for Qt applications.
+
+QLogger is a small drop-in logging module built on top of Qt's native message
+system. It installs a custom `qInstallMessageHandler` so that regular
+`qDebug()`, `qInfo()`, `qWarning()` and `qCritical()` calls are automatically
+formatted, filtered and written to rotating log files — no changes to your
+existing logging code required.
+
+It is intentionally compact (one header + one source file) and has no
+dependencies other than Qt Core, making it easy to embed in desktop, console or
+embedded Qt projects.
+
+## Features
+
+- **Native Qt integration** — works with `qDebug` / `qInfo` / `qWarning` /
+  `qCritical`, including `QLoggingCategory`.
+- **Synchronous or asynchronous writing** — async mode buffers entries on a
+  queue and flushes them on a timer or when the queue grows large.
+- **Log level filtering** — configurable minimum level
+  (`Debug`, `Info`, `Warning`, `Critical`, `Fatal`).
+- **Automatic file rotation** — rotates by size and cleans up old files.
+- **Flexible formatting** — timestamp, thread ID, category and source
+  location (for debug messages).
+- **Thread-safe** — the message handler may be called concurrently from any
+  thread.
+- **Runtime reconfiguration** — change directory, file name, level or mode
+  while the application is running.
+- **Qt 5 and Qt 6 support** (C++17).
+
+## Requirements
+
+- CMake 3.16 or newer
+- C++17
+- Qt 5.15+ or Qt 6 (Core; Widgets only for the demo application)
+
+## Project structure
 
 ```
-QLoggerDemo/
-├── qlogger             # 核心日志模块
-    ├── qlogger.h          
-    ├── qlogger.cpp
-├── logger_test_widget.h      # 完整的测试和演示程序
-├── logger_test_widget.cpp     
-├── main.cpp            # 主程序入口
-├── CMakeLists.txt      # CMake构建配置
-└── README.md           # 详细使用说明
+QLogger/
+├── qlogger/                  # Core library
+│   ├── qlogger.h
+│   └── qlogger.cpp
+├── logger_test_widget.h/.cpp # GUI demo / manual test application
+├── main.cpp                  # Demo entry point
+├── tests/                    # Qt Test based unit tests
+│   ├── CMakeLists.txt
+│   └── tst_qlogger.cpp
+└── CMakeLists.txt
 ```
 
-## 最小化集成
+## Quick start
 
-如果你只想在自己的项目中使用QLogger，只需要：
+### Option 1: Use it as a CMake subdirectory (recommended)
 
-1. **复制 `QLogger.hpp` 到你的项目**
-2. **在代码中包含头文件**
-3. **初始化日志系统**
+The repository exposes a `QLogger` static library target:
 
-### 最简单的集成示例
+```cmake
+add_subdirectory(path/to/QLogger)
+
+target_link_libraries(YourApp PRIVATE QLogger)
+```
+
+Then include the header:
 
 ```cpp
-#include "QLogger.hpp"
-#include <QApplication>
+#include "qlogger/qlogger.h"
+```
 
-int main(int argc, char *argv[]) {
+### Option 2: Copy the sources
+
+Copy `qlogger/qlogger.h` and `qlogger/qlogger.cpp` into your project and link
+against Qt Core.
+
+## Usage
+
+```cpp
+#include <QApplication>
+#include <QStandardPaths>
+
+#include "qlogger/qlogger.h"
+
+int main(int argc, char* argv[]) {
     QApplication app(argc, argv);
-    
-    // 一行代码初始化，使用默认配置
-    initLogger();
-    
-    // 开始使用日志
-    qDebug() << "Hello QLogger!";
+
+    LogConfig config;
+    config.logDir = QStandardPaths::writableLocation(
+                        QStandardPaths::AppDataLocation) + "/logs";
+    config.logFileName = "my_app";
+    config.maxFileSize = 5 * 1024 * 1024;
+    config.maxFileCount = 5;
+    config.minLevel = LogLevel::Info;
+    config.enableConsole = true;
+    config.enableTimestamp = true;
+    config.enableThreadId = true;
+    config.asyncMode = true;
+    config.flushInterval = 1000;
+
+    if (!initLogger(config)) {
+        // Failed to create the log directory or open the log file.
+    }
+
+    // Standard Qt logging is now captured by QLogger.
     qInfo() << "Application started";
-    
-    // 你的应用程序逻辑...
-    
-    // 程序结束前清理
-    shutdownLogger();
+    qDebug() << "This is ignored because minLevel is Info";
+
+    // Convenience macros append to the "app" category.
+    LOG_INFO("User logged in");
+    LOG_WARNING("Cache is almost full");
+
+    // Category-specific convenience macros.
+    LOG_NETWORK_INFO("Connected to server");
+
+    // ... application logic ...
+
+    shutdownLogger();  // flush and close
     return 0;
 }
 ```
 
-## 完整功能测试
+> **Note:** The async flush timer is created on the thread that calls
+> `initLogger()`. Initialize the logger from a thread with a running Qt event
+> loop (normally the main thread) when `asyncMode` is enabled.
 
-运行 `LoggerExample.hpp` 中的测试程序可以：
+## Configuration
 
-- ✅ 测试所有日志级别
-- ✅ 测试高并发日志写入
-- ✅ 实时修改配置参数
-- ✅ 手动触发日志轮转
-- ✅ 观察文件管理功能
-- ✅ 验证性能表现
+| Field             | Default    | Description                                        |
+| ----------------- | ---------- | -------------------------------------------------- |
+| `logDir`          | `"logs"`   | Directory for log files (created if missing).      |
+| `logFileName`     | `"app_log"`| File name prefix.                                  |
+| `maxFileSize`     | `10 MiB`   | Rotate when the active file exceeds this size.     |
+| `maxFileCount`    | `5`        | Number of rotated files to keep.                   |
+| `minLevel`        | `Debug`    | Minimum level to write.                            |
+| `enableConsole`   | `true`     | Also print to stdout/stderr.                       |
+| `enableTimestamp` | `true`     | Include a millisecond timestamp.                   |
+| `enableThreadId`  | `false`    | Include the current thread ID.                     |
+| `asyncMode`       | `false`    | Buffer entries and flush on a timer.               |
+| `flushInterval`   | `1000`     | Async flush interval in milliseconds.              |
 
-## 关键特性总结
+## Log files
 
-### 🚀 高性能
-- 异步写入，不阻塞主线程
-- 批量处理，减少I/O开销
-- 内存队列缓冲，智能刷新策略
+The active file is named `<prefix>_yyyyMMdd.log`. When it exceeds
+`maxFileSize`, it is renamed to `<prefix>_yyyyMMdd_hhmmss_zzz.log` (with a
+numeric suffix if two rotations happen in the same millisecond) and a new
+active file is opened. `cleanupOldFiles()` keeps the newest `maxFileCount`
+rotated files and never deletes the active file.
 
-### 💡 易于使用
-- 单头文件，无需编译
-- 兼容Qt原生日志接口
-- 提供便利宏，简化调用
+## Building the demo
 
-### 🔧 灵活配置
-- 运行时动态配置更改
-- 支持多种日志格式选项
-- 细粒度的级别控制
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+./build/QLoggerDemo.app/Contents/MacOS/QLoggerDemo   # macOS bundle
+```
 
-### 🛡️ 稳定可靠
-- 线程安全设计
-- 自动文件轮转和清理
-- 异常情况下的优雅处理
+## Running the tests
 
-### 📁 智能文件管理
-- 按日期和时间自动命名
-- 超大小自动分割
-- 历史文件自动清理
+The test suite uses Qt Test and covers initialization, level filtering,
+formatting, synchronous and asynchronous writes, rotation, reconfiguration,
+concurrent writes and shutdown.
 
-这个QLogger模块已经可以满足大多数Qt Widget应用的日志需求。它轻量、高效，且易于集成和使用！
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+## Thread safety
+
+`QLogger` is a singleton and all file access is guarded by a mutex. The message
+handler can safely be called from multiple threads. Configuration changes are
+serialized with logging, so `setConfig()` may be called at runtime (for example
+from a settings dialog).
+
+## License
+
+No license has been specified yet. If you plan to use QLogger in an open-source
+project, add a `LICENSE` file (for example MIT or Apache-2.0) before
+distributing it.
